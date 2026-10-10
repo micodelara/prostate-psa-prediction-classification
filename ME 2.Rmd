@@ -1,0 +1,2305 @@
+---
+title: "ME 2"
+author: "Mico de Lara"
+date: "2026-03-15"
+output: html_document
+---
+
+```{r}
+library(tidyverse)
+library(GGally)
+library(ggplot2)
+library(car)
+library(glmnet)  
+library(dplyr)
+library(recipes)
+library(caret)
+library(e1071)
+library(MASS)
+library(rpart)
+library(rpart.plot)
+library(party)
+library(partykit)
+library(adabag)
+library(randomForest)
+library(gt)
+library(pROC)
+library(tidyr)
+library(patchwork)
+library(xgboost)
+```
+
+```{r}
+prostate <- readxl::read_excel("prostate.xlsx")
+
+prostate <- prostate[,-c(1,11)]
+  
+head(prostate)
+
+str(prostate)
+
+summary(prostate)
+
+#Missing Data
+sum(!complete.cases(prostate))
+
+```
+
+```{r}
+ggpairs(prostate, 
+        columns = 1:ncol(prostate),
+        lower = list(continuous = wrap("points", alpha = 0.5)),
+        upper = list(continuous = wrap("cor", size = 3)),
+       diag = list(continuous = wrap("barDiag"))
+)
+```
+
+```{r}
+scatterplotMatrix(prostate[,1:ncol(prostate)-1], smooth = T, regLine=T)
+```
+
+```{r}
+ggplot(prostate, aes(x = age, y = lpsa)) +
+  geom_point() +
+  geom_smooth(method = "loess", se = TRUE,
+              color = "blue", fill = "blue", alpha = 0.3) +
+  geom_smooth(method = "lm", se = TRUE,
+              color = "red", fill = "red", alpha = 0.3)
+  
+```
+
+```{r}
+ggplot(prostate, aes(x = lcavol, y = lpsa)) +
+  geom_point() +
+  geom_smooth(method = "loess", se = TRUE,
+              color = "blue", fill = "blue", alpha = 0.3) +
+  geom_smooth(method = "lm", se = TRUE,
+              color = "red", fill = "red", alpha = 0.3)
+```
+
+```{r}
+ggplot(prostate, aes(x = lweight, y = lpsa)) +
+  geom_point() +
+  geom_smooth(method = "loess", se = TRUE,
+              color = "blue", fill = "blue", alpha = 0.3) +
+  geom_smooth(method = "lm", se = TRUE,
+              color = "red", fill = "red", alpha = 0.3)
+```
+
+
+
+
+```{r}
+cor_matrix <- cor(prostate[,1:ncol(prostate)])
+
+ggcorrplot::ggcorrplot(cor_matrix,
+           type = "lower",
+           lab = TRUE)
+
+plot(prostate)
+```
+
+```{r}
+df_long <- prostate %>%
+  dplyr::select(-pgg45,-age) %>%
+  pivot_longer(cols = where(is.numeric))
+
+ggplot(df_long, aes(x = name, y = value)) +
+  geom_boxplot() +
+  coord_flip()
+
+df_long2 <- prostate %>%
+  dplyr::select(age) %>%
+  pivot_longer(cols = where(is.numeric))
+
+ggplot(df_long2, aes(x = name, y = value)) +
+  geom_boxplot() +
+  coord_flip()
+
+df_long3 <- prostate %>%
+  dplyr::select(pgg45) %>%
+  pivot_longer(cols = where(is.numeric))
+
+ggplot(df_long3, aes(x = name, y = value)) +
+  geom_boxplot() +
+  coord_flip()
+```
+
+#Continuous Response
+
+#Scaling
+
+```{r}
+#Center y, X will be standardized in the modelling function
+#head(prostate)
+y <- prostate |>  dplyr::select(lpsa) |>  scale(center = TRUE, scale = FALSE) |>  as.matrix()
+x <- prostate |>  dplyr::select(-c(lpsa)) |>  as.matrix()
+```
+
+#Train-Test Split
+
+```{r}
+set.seed(123)
+train <- sample(seq_len(nrow(x)),0.7*nrow(x))
+
+```
+
+#Create function for prediction quality evaluation
+
+```{r}
+evaluate_models <- function(models, y_test, x_test){
+  
+  bias <- function(y, yhat){
+    mean(yhat - y)
+  }
+  
+  norm_bias <- function(y, yhat){
+    mean(yhat - y) / mean(y)
+  }
+  
+  mse  <- function(y, yhat){ 
+    mean((yhat - y)^2)
+  }
+  
+  rmse <- function(y, yhat){
+    sqrt(mse(y, yhat))
+  }
+  
+  mspe <- function(y, yhat){
+    mean((yhat - y)^2)
+  }
+  
+  #mspe <- function(y, yhat){
+   # mean(((yhat - y)/y)^2)
+  #}
+  
+  #rmse <- function(y, yhat){
+   # sqrt(mse(y, yhat))
+  #}
+  
+  rmspe <- function(y, yhat){
+    sqrt(mspe(y, yhat))
+  }
+  
+  nrmse <- function(y, yhat){
+    rmse(y, yhat) / (max(y) - min(y))
+  }
+  
+  mae <- function(y, yhat){
+    mean(abs(yhat - y))
+  }
+  
+  mape <- function(y, yhat){
+    mean(abs((yhat - y)/y)) * 100
+  }
+  
+  smape <- function(y, yhat){
+    mean(2 * abs(yhat - y) / (abs(y) + abs(yhat))) * 100
+  }
+  
+  
+  #y <- test_data[[response_var]]
+  y <- y_test
+  
+  results <- lapply(names(models), function(name){
+    
+    model_obj <- models[[name]]$model
+    
+    yhat <- as.vector(predict(model_obj, newx = x_test))
+    
+    data.frame(
+      Model = name,
+      alpha = models[[name]]$alpha,
+      lambda = models[[name]]$lambda,
+      Bias = bias(y, yhat),
+      Normalized_Bias = norm_bias(y, yhat),
+      #MSE = mse(y, yhat),
+      MSPE = mspe(y, yhat),
+      NRMSE = nrmse(y, yhat),
+      RMSE = rmse(y, yhat),
+      RMSPE = rmspe(y, yhat),
+      MAE = mae(y, yhat),
+      MAPE = mape(y, yhat),
+      SMAPE = smape(y, yhat)
+    )
+  })
+  
+  final <- do.call(rbind, results)
+final[ , -1] <- round(final[ , -1], 4) #round to 4 decimal places
+final
+}
+```
+
+#Ridge
+
+```{r}
+set.seed(123)    
+
+# Perform 10-fold cross-validation to select lambda
+lambdas_to_try <- 10^seq(-3, 5, length.out = 100)
+
+# Setting alpha = 0 implements ridge regression
+cv.ridge <- cv.glmnet(x[train,], y[train], alpha = 0, lambda = lambdas_to_try,
+                      standardize = TRUE, nfolds = 10)
+
+# Plot cross-validation results
+plot(cv.ridge,main="Ridge")
+
+bestlam <- cv.ridge$lambda.min
+
+#Fit Final Ridge Model
+ridge.final <- glmnet(x[train,], y[train], alpha=0, lambda=bestlam, standardize = TRUE)
+
+#ridge.predict <- predict(ridge.final,x[-train,])
+
+```
+
+#Lasso
+
+```{r}
+# Setting alpha = 1 implements lasso regression
+cv.lasso <- cv.glmnet(x[train,], y[train], alpha = 1, lambda = lambdas_to_try,
+                      standardize = TRUE, nfolds = 10)
+
+# Plot cross-validation results
+plot(cv.lasso, main="Lasso")
+
+bestlam_lasso <- cv.lasso$lambda.min
+
+#Fit Final Ridge Model
+lasso.final <- glmnet(x[train,], y[train], alpha=1, lambda=bestlam_lasso, standardize = TRUE)
+lasso.final$call$alpha
+```
+
+#Elastic Net
+
+```{r}
+# Set training control
+train_control <- trainControl(method = "repeatedcv",
+                              number = 5,
+                              repeats = 5,
+                              search = "random",
+                              verboseIter = TRUE)
+
+# Train the model
+elastic_net_model <- train(lpsa ~ .,
+                           data = data.frame(lpsa=y[train], x[train,]),
+                           method = "glmnet",
+                           preProcess = c("center", "scale"),
+                           tuneLength = 25,
+                           trControl = train_control)
+
+a <- as.numeric(elastic_net_model$bestTune$alpha)
+l <- elastic_net_model$bestTune$lambda
+
+#Fit Final Elastic net Model
+elnet.final <- glmnet(x[train,], y[train], alpha=a, lambda=l, standardize = TRUE)
+
+```
+
+```{r}
+models <- list(
+  Ridge = list(model = ridge.final, alpha = 0, lambda = ridge.final$lambda[1]),
+  Lasso = list(model = lasso.final, alpha = 1, lambda = lasso.final$lambda[1]),
+  ElasticNet = list(model = elnet.final, alpha = a, lambda = l)
+)
+
+evaluate_models(models, y[-train], x[-train,])
+```
+
+```{r}
+
+
+m <- evaluate_models(models, y[-train], x[-train,])
+
+metric_cols <- c("Bias", "MSPE", "NRMSE", "RMSE", "RMSPE", "MAE", "MAPE", "SMAPE")
+
+
+
+gt_tbl <- gt(m)
+
+# Loop over columns
+for (col in metric_cols) {
+  min_row <- which.min(m[[col]])  # row index of minimum
+  gt_tbl <- gt_tbl %>%
+    tab_style(
+      style = list(
+        cell_fill(color = "yellow"),
+        cell_text(weight = "bold")
+        #cell_borders(color = "#000000", weight = px(2))
+      ),
+      locations = cells_body(
+        columns = all_of(col),  # the column to highlight
+        rows = min_row          # the row to highlight
+      )
+    )
+}
+
+gt_tbl
+
+```
+
+#Retrain using all the data
+
+```{r}
+ridge.final.all <- glmnet(x, y, alpha=0, lambda=bestlam, standardize = TRUE)
+lasso.final.all <- glmnet(x, y, alpha=1, lambda=bestlam_lasso, standardize = TRUE)
+elnet.final.all <- glmnet(x, y, alpha=a, lambda=l, standardize = TRUE)
+```
+
+```{r}
+# Models list
+models <- list(
+  Ridge = ridge.final.all,
+  Lasso = lasso.final.all,
+  ElasticNet = elnet.final.all
+)
+
+# Variable names (assuming X has column names)
+terms <- c("(Intercept)", colnames(x))
+
+# Extract coefficients at fitted lambda
+coef_table <- sapply(models, function(mod){
+  # Convert coefficients to numeric vector
+  round(as.vector(coef(mod)),3)
+})
+
+coef_table <- data.frame(coef_table)
+# Name the rows
+rownames(coef_table) <- terms
+
+coef_table2 <- coef_table  |> 
+  rownames_to_column(var = "Variable")
+
+# Create gt table with row labels
+gt(coef_table2, rowname_col = "Variable")
+
+```
+
+#Binary Response
+
+```{r}
+
+prostate_binary.master <- prostate |> 
+  mutate(psa=exp(lpsa)) |> 
+  mutate(psa_binary=ifelse(psa>4,1,0)) |> #0-normal, 1-abnormal
+  dplyr::select(-lpsa,-psa)
+
+
+prostate_binary.master$psa_binary <- factor(
+  prostate_binary.master$psa_binary,
+  levels = c(0, 1),
+  labels = c("Low PSA (0)", "High PSA (1)")
+)
+
+prostate_binary.master$svi <- factor(prostate_binary.master$svi)
+prostate_binary.master$gleason <- factor(prostate_binary.master$gleason)
+
+prostate_binary <- prostate_binary.master
+
+#prostate_binary$psa_binary <- factor(prostate_binary$psa_binary)
+
+
+contrasts(prostate_binary.master$psa_binary)
+str(prostate_binary.master)
+head(prostate_binary.master)
+summary(prostate_binary.master)
+table(prostate_binary.master$psa_binary)
+```
+
+#Train-test split
+
+```{r}
+set.seed(123)
+train_binary <- sample(seq_len(nrow(prostate_binary)),0.7*nrow(prostate_binary))
+
+table(prostate_binary[train_binary,]$psa_binary)
+table(prostate_binary$psa_binary)
+
+str(prostate_binary[train_binary,])
+```
+
+#Logistic regression
+
+#Stepwise Selection
+
+```{r}
+LR_model <- glm(psa_binary ~., data = prostate_binary, family = binomial(link="logit"))
+
+#Stepwise variable selection
+step_model <- stats::step(LR_model, direction ="both")
+
+stargazer::stargazer(LR_model, step_model, type = "text",
+          column.labels = c("Full Model", "Stepwise Model"))
+
+
+stargazer::stargazer(
+  LR_model, step_model,
+  type = "latex",
+  out = "logit_results.html",
+  title = "Logistic Regression Analysis",
+  column.labels = c("Full Model", "Stepwise Model"),
+  apply.coef = exp,
+  digits = 3,
+  align = TRUE,
+  no.space = TRUE,
+  keep.stat = c("n", "aic"),
+  notes = "Odds ratios reported. Robust interpretation advised due to stepwise selection.",
+  notes.align = "l"
+)
+```
+
+```{r}
+library(stargazer)
+
+# Extract coefficients and compute OR
+coef_full <- coef(LR_model)
+coef_step <- coef(step_model)
+
+or_full <- exp(coef_full)
+or_step <- exp(coef_step)
+
+p_full <- summary(LR_model)$coefficients[,4]
+p_step <- summary(step_model)$coefficients[,4]
+
+stargazer(
+  LR_model, step_model,
+  type = "latex",
+  out = "logit_results2.html",
+  title = "Logistic Regression Analysis",
+  column.labels = c("Full Model", "Stepwise Model"),
+  
+  coef = list(coef_full, coef_step),
+  se = list(or_full, or_step),  # using SE slot to display ORs
+  p = list(p_full, p_step),
+  align = TRUE,
+  digits = 3,
+  keep.stat = c("n", "aic"),
+  notes = "Log-odds coefficients reported; odds ratios in parentheses; significance based on p-values.",
+  notes.align = "l"
+)
+```
+#Multicollinearity assumption
+```{r}
+LR_model <- glm(psa_binary ~lcavol + lweight + lcp, data = prostate_binary.master, family = binomial(link="logit"))
+vif(LR_model)
+```
+
+#Walds test
+```{r}
+#ANOVA or analysis of Deviance
+anova(LR_model, test="Chisq")
+
+aod::wald.test(b = coef(LR_model), Sigma = vcov(LR_model), Terms = 2:4)
+
+# LRT or chi-square test
+with(LR_model, null.deviance - deviance)
+with(LR_model, df.null)
+with(LR_model, df.residual)
+with(LR_model, df.null - df.residual)
+with(LR_model, pchisq(null.deviance - deviance, df.null - df.residual, lower.tail = FALSE))
+```
+
+
+```{r}
+
+LR_model2.train <- glm(psa_binary ~lcavol + lweight + lcp, data = prostate_binary[train_binary, ], family = binomial(link="logit"))
+
+#AIC(LR_model2.train)
+#AIC(LR_model)
+
+#summary(LR_model2.train)
+
+#train error 0.8955224
+probs <- predict(LR_model2.train, type = "response")
+glm.pred <- ifelse(probs > 0.5, 1, 0)
+
+true <- as.numeric(prostate_binary[train_binary,]$psa_binary) - 1
+mean(true == glm.pred) # accuracy
+
+table(prostate_binary[train_binary,]$psa_binary, glm.pred) #rows true cols pred
+
+
+#test error 0.9
+probs1 <- predict(LR_model2.train, newdata = prostate_binary[-train_binary, ], type = "response")
+
+glm.pred1 <- ifelse(probs1 > 0.5, 1, 0)
+true_test <- as.numeric(prostate_binary$psa_binary[-train_binary]) - 1
+
+table(prostate_binary[-train_binary, ]$psa_binary, glm.pred1) #rows true cols pred
+mean(true_test == glm.pred1) # accuracy
+
+
+pred.lr.factor <- factor(true_test, 
+                         levels=c(0,1),
+                         labels=c("Low PSA (0)", "High PSA (1)"))
+mean(pred.lr.factor == prostate_binary[-train_binary, ]$psa_binary)
+confusionMatrix(data=pred.lr.factor, reference=prostate_binary[-train_binary, ]$psa_binary)
+#anova(LR_model2.train,LR_model, test = "Chisq")
+```
+
+#Fit decision boundary #decision boundary and lcavol is fixed
+
+```{r}
+#retrain model using all the data
+
+LR_model2 <- glm(psa_binary ~lcavol + lweight +lcp, data = prostate_binary, family = binomial(link="logit"))
+
+coef(LR_model2)
+
+#Predicted probabilities
+prostate_binary$prob <- predict(LR_model2, type = "response")
+
+#Predicted class
+prostate_binary$pred_class <- ifelse(
+  prostate_binary$prob > 0.5, 1, 0)
+
+#Create lcavol_group in prostate_binary
+cuts <- quantile(prostate_binary$lcavol, probs = c(0.25, 0.50, 0.75))
+
+prostate_binary$lcavol_group <- cut(
+  prostate_binary$lcavol,
+  breaks = c(-Inf, cuts[1], cuts[2], Inf),
+  labels = c("Low lcavol", "Medium lcavol", "High lcavol")
+)
+
+lcavol_df <- prostate_binary %>%  
+  group_by(lcavol_group) %>%
+  summarise(
+    lcavol = median(lcavol),
+    .groups = "drop")
+
+
+prostate_binary$pred_class <- factor(
+  prostate_binary$pred_class,
+  levels = c(0, 1),
+  labels = c("Low PSA (0)", "High PSA (1)")
+)
+
+
+#Force correct order
+prostate_binary$lcavol_group <- factor(
+  prostate_binary$lcavol_group,
+  levels = c("Low lcavol", "Medium lcavol", "High lcavol")
+)
+
+#################
+ranges <- prostate_binary %>%
+  group_by(lcavol_group) %>%
+  summarise(
+    lw_min = min(lweight),
+    lw_max = max(lweight),
+    .groups = "drop"
+  )
+
+#################
+
+b <- coef(LR_model2)
+
+padding <- 2   # adjust as needed
+
+dbound_trimmed <- ranges %>%
+  rowwise() %>%
+  do({
+    lw_seq <- seq(
+      .$lw_min - padding,
+      .$lw_max - 1, #+ padding,
+      length.out = 200
+    )
+
+    lcavol_val <- lcavol_df$lcavol[
+      match(.$lcavol_group, lcavol_df$lcavol_group)
+    ]
+
+    data.frame(
+      lweight = lw_seq,
+      lcp = -(b[1] +
+               b[2] * lcavol_val +
+               b[3] * lw_seq) / b[4],
+      lcavol_group = .$lcavol_group
+    )
+  })
+
+##################
+plot_data <- prostate_binary |>
+  dplyr::select(lweight, lcp, lcavol_group, psa_binary, pred_class) |>
+  tidyr::pivot_longer(
+    cols = c(psa_binary, pred_class),
+    names_to = "Type",
+    values_to = "PSA"
+  ) |>
+  dplyr::mutate(
+    Type = dplyr::recode(
+      Type,
+      psa_binary = "Observed",
+      pred_class = "Predicted"
+    )
+  )
+
+
+############
+ggplot(plot_data, aes(lweight, lcp)) +
+  geom_point(aes(color = PSA), size = 2) +
+  geom_line(
+    data = dbound_trimmed,
+    aes(lweight, lcp),
+    color = "black",
+    linewidth = 1.3,
+    inherit.aes = FALSE
+  ) +
+  facet_grid(Type ~ lcavol_group) +
+  scale_color_manual(
+    values = c("Low PSA (0)" = "dark green",
+               "High PSA (1)" = "red"),
+    name = "PSA Class"
+  ) +
+  labs(
+    title = "Observed vs Predicted PSA with Logistic Decision Boundaries",
+    subtitle = "Fixed lcavol",
+    x = "lweight",
+    y = "lcp"
+  ) +
+  theme_bw()
+
+
+```
+
+#decision boundary and lweight is fixed
+
+```{r}
+#Create lcavol_group in prostate_binary
+cuts2 <- quantile(prostate_binary$lweight, probs = c(0.25, 0.50, 0.75))
+
+prostate_binary$lweight_group <- cut(
+  prostate_binary$lweight,
+  breaks = c(-Inf, cuts2[1], cuts2[2], Inf),
+  labels = c("Low lweight", "Medium lweight", "High lweight")
+)
+
+lweight_df <- prostate_binary %>%  
+  group_by(lweight_group) %>%
+  summarise(
+    lweight = median(lweight),
+    .groups = "drop")
+
+
+#prostate_binary$pred_class <- factor(
+#  prostate_binary$pred_class,
+#  levels = c(0, 1),
+#  labels = c("Low PSA (0)", "High PSA (1)")
+#)
+
+
+#Force correct order
+prostate_binary$lweight_group <- factor(
+  prostate_binary$lweight_group,
+  levels = c("Low lweight", "Medium lweight", "High lweight")
+)
+
+#################
+ranges <- prostate_binary %>%
+  group_by(lweight_group) %>%
+  summarise(
+    lcvl_min = min(lcavol),
+    lcvl_max = max(lcavol),
+    .groups = "drop"
+  )
+
+#################
+
+b <- coef(LR_model2)
+
+padding <- 2   # adjust as needed
+
+dbound_trimmed <- ranges %>%
+  rowwise() %>%
+  do({
+    lcvl_seq <- seq(
+      .$lcvl_min - padding,
+      .$lcvl_max - 1, #+ padding,
+      length.out = 200
+    )
+
+    lweight_val <- lweight_df$lweight[
+      match(.$lweight_group, lweight_df$lweight_group)
+    ]
+
+    data.frame(
+      lcavol = lcvl_seq,
+      lcp = -(b[1] +
+               b[3] * lweight_val +
+               b[2] * lcvl_seq) / b[4],
+      lweight_group = .$lweight_group
+    )
+  })
+
+##################
+plot_data <- prostate_binary |>
+  dplyr::select(lcavol, lcp, lweight_group, psa_binary, pred_class) |>
+  tidyr::pivot_longer(
+    cols = c(psa_binary, pred_class),
+    names_to = "Type",
+    values_to = "PSA"
+  ) |>
+  dplyr::mutate(
+    Type = dplyr::recode(
+      Type,
+      psa_binary = "Observed",
+      pred_class = "Predicted"
+    )
+  )
+
+
+############
+ggplot(plot_data, aes(lcavol, lcp)) +
+  geom_point(aes(color = PSA), size = 2) +
+  geom_line(
+    data = dbound_trimmed,
+    aes(lcavol, lcp),
+    color = "black",
+    linewidth = 1.3,
+    inherit.aes = FALSE
+  ) +
+  facet_grid(Type ~ lweight_group) +
+  scale_color_manual(
+    values = c("Low PSA (0)" = "dark green",
+               "High PSA (1)" = "red"),
+    name = "PSA Class"
+  ) +
+  labs(
+    title = "Observed vs Predicted PSA with Logistic Decision Boundaries",
+    subtitle = "Fixed lweight",
+    x = "lcavol",
+    y = "lcp"
+  ) +
+  theme_bw()
+
+```
+
+#decision boundary and lcp is fixed
+
+```{r}
+#Create lcavol_group in prostate_binary
+cuts3 <- quantile(prostate_binary$lcp, probs = c(0.25, 0.50, 0.75))
+
+prostate_binary$lcp_group <- cut(
+  prostate_binary$lcp,
+  breaks = c(-Inf, cuts3[1], cuts3[2], Inf),
+  labels = c("Low lcp", "Medium lcp", "High lcp")
+)
+
+lcp_df <- prostate_binary %>%  
+  group_by(lcp_group) %>%
+  summarise(
+    lcp = median(lcp),
+    .groups = "drop")
+
+
+#Force correct order
+prostate_binary$lcp_group <- factor(
+  prostate_binary$lcp_group,
+  levels = c("Low lcp", "Medium lcp", "High lcp")
+)
+
+#################
+ranges <- prostate_binary %>%
+  group_by(lcp_group) %>%
+  summarise(
+    lw_min = min(lweight),
+    lw_max = max(lweight),
+    .groups = "drop"
+  )
+
+#################
+
+b <- coef(LR_model2)
+
+padding <- 2   # adjust as needed
+
+dbound_trimmed <- ranges %>%
+  rowwise() %>%
+  do({
+    lw_seq <- seq(
+      .$lw_min - padding,
+      .$lw_max - 1, #+ padding,
+      length.out = 200
+    )
+
+    lcp_val <- lcp_df$lcp[
+      match(.$lcp_group, lcp_df$lcp_group)
+    ]
+
+    data.frame(
+      lweight = lw_seq,
+      lcavol = -(b[1] +
+               b[4] * lcp_val +
+               b[3] * lw_seq) / b[2],
+      lcp_group = .$lcp_group
+    )
+  })
+
+##################
+plot_data <- prostate_binary |>
+  dplyr::select(lweight, lcavol, lcp_group, psa_binary, pred_class) |>
+  tidyr::pivot_longer(
+    cols = c(psa_binary, pred_class),
+    names_to = "Type",
+    values_to = "PSA"
+  ) |>
+  dplyr::mutate(
+    Type = dplyr::recode(
+      Type,
+      psa_binary = "Observed",
+      pred_class = "Predicted"
+    )
+  )
+
+
+############
+ggplot(plot_data, aes(lweight, lcavol)) +
+  geom_point(aes(color = PSA), size = 2) +
+  geom_line(
+    data = dbound_trimmed,
+    aes(lweight, lcavol),
+    color = "black",
+    linewidth = 1.3,
+    inherit.aes = FALSE
+  ) +
+  facet_grid(Type ~ lcp_group) +
+  scale_color_manual(
+    values = c("Low PSA (0)" = "dark green",
+               "High PSA (1)" = "red"),
+    name = "PSA Class"
+  ) +
+  labs(
+    title = "Observed vs Predicted PSA with Logistic Decision Boundaries",
+    subtitle = "Fixed lcp",
+    x = "lweight",
+    y = "lcavol"
+  ) +
+  theme_bw()
+
+```
+
+
+#Confusion Matrix (LR)
+
+```{r}
+
+```
+
+
+
+#Naive Bayes
+
+```{r}
+prostate_binary.NB <- prostate |> 
+  mutate(psa=exp(lpsa)) |> 
+  mutate(psa_binary=ifelse(psa>4,1,0)) |> #0-normal, 1-abnormal
+  dplyr::select(-lpsa,-psa)
+
+
+prostate_binary.NB$psa_binary <- factor(
+  prostate_binary.NB$psa_binary,
+  levels = c(0, 1),
+  labels = c("Low PSA (0)", "High PSA (1)")
+)
+
+prostate_binary.NB$svi <- factor(prostate_binary.NB$svi)
+prostate_binary.NB$gleason <- factor(prostate_binary.NB$gleason)
+
+str(prostate_binary.NB)
+```
+
+```{r}
+NB_model <- naiveBayes(psa_binary~., data=prostate_binary.NB)
+NB_model
+
+head(predict(NB_model, prostate_binary.NB, type="raw"))
+nb.pred <- predict(NB_model, prostate_binary.NB)
+table(prostate_binary.NB$psa_binary,nb.pred)
+mean(prostate_binary.NB$psa_binary == nb.pred)
+
+
+NB_model2 <- naiveBayes(psa_binary~ lcavol + lweight + lcp, data=prostate_binary.NB)
+attributes(NB_model2)
+NB_model2$tables
+
+head(predict(NB_model2, prostate_binary.NB, type="raw"))
+nb.pred <- predict(NB_model2, prostate_binary.NB)
+table(prostate_binary.NB$psa_binary,nb.pred)
+mean(prostate_binary.NB$psa_binary == nb.pred)
+
+NB_model3 <- naiveBayes(psa_binary~ lcavol + lweight, data=prostate_binary.NB)
+
+head(predict(NB_model3, prostate_binary.NB, type="raw"))
+nb.pred <- predict(NB_model3, prostate_binary.NB)
+table(prostate_binary.NB$psa_binary,nb.pred)
+mean(prostate_binary.NB$psa_binary == nb.pred)
+
+NB_model4 <- naiveBayes(psa_binary~ lcavol, data=prostate_binary.NB)
+
+head(predict(NB_model4, prostate_binary.NB, type="raw"))
+nb.pred <- predict(NB_model4, prostate_binary.NB)
+table(prostate_binary.NB$psa_binary,nb.pred)
+mean(prostate_binary.NB$psa_binary == nb.pred) 
+
+
+```
+
+#CV NB
+
+```{r}
+
+response <- "psa_binary"
+
+cv_nb_metrics <- function(data, response, predictors, k = 5, positive = "High PSA (1)", laplace=1) {
+  set.seed(123)
+  folds <- sample(rep(1:k, length.out = nrow(data)))
+  
+  metrics <- data.frame(
+    accuracy = numeric(k),
+    sensitivity = numeric(k),
+    specificity = numeric(k),
+    precision = numeric(k),
+    f1 = numeric(k),
+    auc = numeric(k)
+  )
+  
+  for (i in 1:k) {
+    train <- data[folds != i, ]
+    test  <- data[folds == i, ]
+    
+    formula <- as.formula(
+      paste(response, "~", paste(predictors, collapse = "+"))
+    )
+    
+    model <- naiveBayes(formula, data = train, laplace = laplace)
+    
+    probs <- predict(model, test, type = "raw")[, positive]
+    preds <- predict(model, test)
+    
+    actual <- test[[response]]
+    
+    TP <- sum(preds == positive & actual == positive)
+    TN <- sum(preds != positive & actual != positive)
+    FP <- sum(preds == positive & actual != positive)
+    FN <- sum(preds != positive & actual == positive)
+    
+    metrics$accuracy[i]    <- (TP + TN) / (TP + TN + FP + FN)
+    metrics$sensitivity[i] <- ifelse((TP + FN) == 0, NA, TP / (TP + FN))
+    metrics$specificity[i] <- ifelse((TN + FP) == 0, NA, TN / (TN + FP))
+    metrics$precision[i]   <- ifelse((TP + FP) == 0, NA, TP / (TP + FP))
+    metrics$f1[i]          <- ifelse(is.na(metrics$precision[i]) | is.na(metrics$sensitivity[i]),
+                                    NA,
+                                    2 * metrics$precision[i] * metrics$sensitivity[i] /
+                                      (metrics$precision[i] + metrics$sensitivity[i]))
+    
+    metrics$auc[i] <- as.numeric(roc(actual, probs)$auc)
+  }
+  
+  round(colMeans(metrics, na.rm = TRUE), 4)
+}
+
+predictors1 <- c("lcavol", "lweight", "lcp","lbph", "svi", "age", "gleason", "pgg45")
+predictors2 <- c("lcavol", "lweight", "lcp")
+predictors3 <- c("lcavol", "lweight")
+predictors4 <- c("lcavol", "lcp")
+predictors5 <- c("lweight", "lcp")
+predictors6 <- c("pgg45", "lcp")
+predictors7 <- c("pgg45")
+predictors8 <- c("lcavol", "lweight", "lcp", "age")
+predictors9 <- c("lcavol", "lweight", "lcp", "age", "pgg45")
+predictors10 <- c("lweight", "pgg45")
+predictors11 <- c("lweight", "lcp", "age", "pgg45")
+predictors12 <- c("lweight", "lcp", "age")
+predictors13 <- c("lcavol", "lweight", "lcp","lbph")
+predictors14 <- c("lcavol", "lweight", "lcp","lbph", "age", "pgg45")
+predictors15 <- c("lweight", "lcp","lbph")
+predictors16 <- c("lweight", "lcp","pgg45")
+predictors17 <- c("lcavol", "lweight", "lcp", "age", "svi")
+predictors18 <- c("lcavol", "lweight", "lcp", "pgg45")
+
+nb.1 <- cv_nb_metrics(prostate_binary.NB, response, predictors1, k = 5)
+nb.2 <- cv_nb_metrics(prostate_binary.NB, response, predictors2, k = 5)
+nb.3 <- cv_nb_metrics(prostate_binary.NB, response, predictors3, k = 5)
+nb.4 <- cv_nb_metrics(prostate_binary.NB, response, predictors4, k = 5)
+nb.5 <- cv_nb_metrics(prostate_binary.NB, response, predictors5, k = 5)
+nb.6 <- cv_nb_metrics(prostate_binary.NB, response, predictors6, k = 5)
+nb.7 <- cv_nb_metrics(prostate_binary.NB, response, predictors7, k = 5)
+nb.8 <- cv_nb_metrics(prostate_binary.NB, response, predictors8, k = 5)
+nb.9 <- cv_nb_metrics(prostate_binary.NB, response, predictors9, k = 5)
+nb.10 <- cv_nb_metrics(prostate_binary.NB, response, predictors10, k = 5)
+nb.11 <- cv_nb_metrics(prostate_binary.NB, response, predictors11, k = 5)
+nb.12 <- cv_nb_metrics(prostate_binary.NB, response, predictors12, k = 5)
+nb.13 <- cv_nb_metrics(prostate_binary.NB, response, predictors13, k = 5)
+nb.14 <- cv_nb_metrics(prostate_binary.NB, response, predictors14, k = 5)
+nb.15 <- cv_nb_metrics(prostate_binary.NB, response, predictors15, k = 5)
+nb.16 <- cv_nb_metrics(prostate_binary.NB, response, predictors16, k = 5)
+nb.17 <- cv_nb_metrics(prostate_binary.NB, response, predictors17, k = 5)
+nb.18 <- cv_nb_metrics(prostate_binary.NB, response, predictors18, k = 5)
+
+nb.df <-  data.frame(Predictors=c("lcavol,lweight,lcp,lbph, svi, age, gleason, pgg45", 
+                                  "lcavol,lweight,lcp", 
+                                  "lcavol,lweight", 
+                                  "lcavol, lcp", 
+                                  "lweight,lcp", 
+                                  "pgg45, lcp", 
+                                  "pgg45", 
+                                  "lcavol,lweight, lcp, age", 
+                                  "lcavol,lweight, lcp, age, pgg45", 
+                                  "lweight, pgg45", 
+                                  "lweight, lcp, age, pgg45", 
+                                  "lweight, lcp, age", 
+                                  "lcavol, lweight, lcp, lbph", 
+                                  "lcavol, lweight, lcp, lbph, age, pgg45",
+                                  "lweight, lcp, lbph",
+                                  "lweight, lcp, pgg45",
+                                  "lcavol,lweight, lcp, age, svi",
+                                  "lcavol,lweight, lcp, pgg45"),
+                     rbind(nb.1,nb.2,nb.3,nb.4,nb.5, nb.6, nb.7, nb.8, nb.9, nb.10, nb.11, nb.12, nb.13, nb.14, nb.15, nb.16,nb.17, nb.18))
+
+metric_nb <- c("accuracy", "sensitivity", "specificity", "f1", "precision", "auc")
+
+gt_nb <- gt(nb.df)
+
+# Loop over columns
+for (col in metric_nb) {
+  min_row <- which.max(nb.df[[col]])  # row index of minimum
+  gt_nb <- gt_nb %>%
+    tab_style(
+      style = list(
+        cell_fill(color = "yellow"),
+        cell_text(weight = "bold")
+        #cell_borders(color = "#000000", weight = px(2))
+      ),
+      locations = cells_body(
+        columns = all_of(col),  # the column to highlight
+        rows = min_row          # the row to highlight
+      )
+    )
+}
+
+gt_nb
+
+```
+
+
+#importance NB
+```{r}
+library(vip)
+
+vi_rf <- vi(
+  NB,
+  method = "permute",
+  train = prostate_binary.master[train_binary,],
+  target = "psa_binary",
+  metric = "accuracy",
+  pred_wrapper = function(object, newdata) {
+    predict(object, newdata, type = "class")
+  },
+  nsim = 10
+)
+
+vi_rf
+```
+
+#CHeck assumptions of independence
+```{r}
+data <- prostate_binary.master
+
+data_low  <- subset(data, psa_binary == "Low PSA (0)")
+data_high <- subset(data, psa_binary == "High PSA (1)")
+
+vars <- c("lcavol", "lweight", "lcp", "age")
+
+cor_low  <- cor(data_low[, vars])
+cor_high <- cor(data_high[, vars])
+
+cor_low
+cor_high
+```
+
+
+
+
+```{r}
+
+NB.data2 <- prostate_binary.NB
+
+NB_model2 <- naiveBayes(psa_binary~ lcavol + lweight + lcp, data=prostate_binary.NB)
+NB.data3 <- cbind(NB.data2,pred_class=predict(NB_model2, NB.data2))
+str(NB.data3)
+
+#nb.pred <- predict(NB_model2, prostate_binary.NB)
+
+
+#NB.data3$pred_class <- factor(
+#  NB.data3$pred_class,
+#  levels = c(0,1),
+#  labels = c("Low PSA (0)", "High PSA (1)")
+#)
+
+########################
+
+cuts <- quantile(NB.data3$lcavol, probs = c(0.25, 0.50, 0.75))
+
+NB.data3$lcavol_group <- cut(
+  NB.data3$lcavol,
+  breaks = c(-Inf, cuts[1], cuts[2], Inf),
+  labels = c("Low lcavol", "Medium lcavol", "High lcavol")
+)
+
+NB.data3$lcavol_group <- factor(
+  NB.data3$lcavol_group,
+  levels = c("Low lcavol", "Medium lcavol", "High lcavol")
+)
+
+####################
+
+
+plot_data_nb <- NB.data3 %>%
+  dplyr::select(lweight, lcp, lcavol_group, psa_binary, pred_class) %>%
+  tidyr::pivot_longer(
+    cols = c(psa_binary, pred_class),
+    names_to = "Type",
+    values_to = "PSA"
+  ) %>%
+  dplyr::mutate(
+    Type = dplyr::recode(
+      Type,
+      psa_binary = "Observed",
+      pred_class = "Predicted"
+    )
+  )
+
+plot_data_nb$PSA
+##################
+
+ggplot(plot_data_nb, aes(lweight, lcp)) +
+  geom_point(aes(color = PSA), size = 2) +
+  facet_grid(Type ~ lcavol_group) +
+  scale_color_manual(
+    values = c("Low PSA (0)" = "dark green",
+               "High PSA (1)" = "red"),
+    name = "PSA Class"
+  ) +
+  labs(
+    title = "Observed vs Predicted PSA (Naive Bayes)",
+    subtitle = "Fixed lcavol",
+    x = "lweight",
+    y = "lcp"
+  ) +
+  theme_bw()
+```
+
+#LDA
+
+```{r}
+
+
+#for LDA
+
+prostate_LDA <- prostate_binary.master
+prostate_LDA$svi <- as.numeric(prostate_LDA$svi)
+prostate_LDA$gleason <- as.numeric(prostate_LDA$gleason)
+prostate_LDA$pgg45 <- as.numeric(prostate_LDA$pgg45)
+
+str(prostate_LDA)
+prostate_LDA$pgg45
+```
+
+```{r}
+response <- "psa_binary"
+
+cv_lda_metrics <- function(data, response, predictors, k = 5, positive = "High PSA (1)") {
+  set.seed(123)
+  folds <- sample(rep(1:k, length.out = nrow(data)))
+  
+  metrics <- data.frame(
+    accuracy = numeric(k),
+    sensitivity = numeric(k),
+    specificity = numeric(k),
+    precision = numeric(k),
+    f1 = numeric(k),
+    auc = numeric(k)
+  )
+  
+  for (i in 1:k) {
+    train <- data[folds != i, ]
+    test  <- data[folds == i, ]
+    
+    formula <- as.formula(
+      paste(response, "~", paste(predictors, collapse = "+"))
+    )
+    
+    model <- lda(formula, data = train)
+    
+   pred_obj <- predict(model, test)
+
+probs <- pred_obj$posterior[, positive]
+preds <- pred_obj$class
+    
+    actual <- test[[response]]
+    
+    TP <- sum(preds == positive & actual == positive)
+    TN <- sum(preds != positive & actual != positive)
+    FP <- sum(preds == positive & actual != positive)
+    FN <- sum(preds != positive & actual == positive)
+    
+    metrics$accuracy[i]    <- (TP + TN) / (TP + TN + FP + FN)
+    metrics$sensitivity[i] <- ifelse((TP + FN) == 0, NA, TP / (TP + FN))
+    metrics$specificity[i] <- ifelse((TN + FP) == 0, NA, TN / (TN + FP))
+    metrics$precision[i]   <- ifelse((TP + FP) == 0, NA, TP / (TP + FP))
+    metrics$f1[i]          <- ifelse(is.na(metrics$precision[i]) | is.na(metrics$sensitivity[i]),
+                                    NA,
+                                    2 * metrics$precision[i] * metrics$sensitivity[i] /
+                                      (metrics$precision[i] + metrics$sensitivity[i]))
+    
+    metrics$auc[i] <- as.numeric(roc(actual, probs)$auc)
+  }
+  
+  round(colMeans(metrics, na.rm = TRUE),4)
+}
+
+#predictors1 <- c("lcavol", "lweight", "lcp","lbph", "age")
+#predictors2 <- c("lcavol", "lweight", "lcp")
+#predictors3 <- c("lcavol", "lweight")
+#predictors4 <- c("lcavol")
+#predictors5 <- c("lweight")
+
+#lda.1 <- round(cv_lda_metrics(prostate_LDA, response, predictors1, k = 5),4)
+#lda.2 <- round(cv_lda_metrics(prostate_LDA, response, predictors2, k = 5),4)
+#lda.3 <- round(cv_lda_metrics(prostate_LDA, response, predictors3, k = 5),4)
+#lda.4 <- round(cv_lda_metrics(prostate_LDA, response, predictors4, k = 5),4)
+#lda.5 <- round(cv_lda_metrics(prostate_LDA, response, predictors5, k = 5),4)
+
+
+predictors1 <- c("lcavol", "lweight", "lcp","lbph", "age", "pgg45", "svi", "gleason")
+predictors2 <- c("lcavol", "lweight", "lcp", "lbph")
+predictors3 <- c("lcavol", "lweight", "lcp")
+predictors4 <- c("lcavol", "lweight")
+predictors5 <- c("lcavol", "pgg45")
+predictors6 <- c("lweight", "lcp", "pgg45")
+predictors7 <- c("lweight", "lcp", "lbph")
+predictors8 <- c("lweight", "lcp", "lbph","age")
+predictors9 <- c("lcavol", "lcp")
+predictors10 <- c("lcavol", "lcp", "lbph")
+predictors11 <- c("lcavol", "lcp", "lbph", "age")
+predictors12 <- c("lcavol", "lweight", "lcp", "age")
+predictors13 <- c("lweight")
+predictors14 <- c("lcp", "lbph")
+predictors15 <- c("lcp", "lbph", "age")
+predictors16 <- c("lcp")
+predictors17 <- c("lbph", "age")
+predictors18 <- c("lcavol", "lweight","age")
+
+lda.1 <- cv_lda_metrics(prostate_LDA, response, predictors1, k = 5)
+lda.2 <- cv_lda_metrics(prostate_LDA, response, predictors2, k = 5)
+lda.3 <- cv_lda_metrics(prostate_LDA, response, predictors3, k = 5)
+lda.4 <- cv_lda_metrics(prostate_LDA, response, predictors4, k = 5)
+lda.5 <- cv_lda_metrics(prostate_LDA, response, predictors5, k = 5)
+lda.6 <- cv_lda_metrics(prostate_LDA, response, predictors6, k = 5)
+lda.7 <- cv_lda_metrics(prostate_LDA, response, predictors7, k = 5)
+lda.8 <- cv_lda_metrics(prostate_LDA, response, predictors8, k = 5)
+lda.9 <- cv_lda_metrics(prostate_LDA, response, predictors9, k = 5)
+lda.10 <- cv_lda_metrics(prostate_LDA, response, predictors10, k = 5)
+lda.11 <- cv_lda_metrics(prostate_LDA, response, predictors11, k = 5)
+lda.12 <- cv_lda_metrics(prostate_LDA, response, predictors12, k = 5)
+lda.13 <- cv_lda_metrics(prostate_LDA, response, predictors13, k = 5)
+lda.14 <- cv_lda_metrics(prostate_LDA, response, predictors14, k = 5)
+lda.15 <- cv_lda_metrics(prostate_LDA, response, predictors15, k = 5)
+lda.16 <- cv_lda_metrics(prostate_LDA, response, predictors16, k = 5)
+lda.17 <- cv_lda_metrics(prostate_LDA, response, predictors17, k = 5)
+lda.18 <- cv_lda_metrics(prostate_LDA, response, predictors18, k = 5)
+
+lda.df <-  data.frame(Predictors=c(
+  "lcavol, lweight, lcp,lbph, age, svi, pgg45, gleason",
+"lcavol, lweight, lcp, lbph",
+"lcavol, lweight, lcp",
+"lcavol, lweight",
+"lcavol, pgg45",
+"lweight, lcp, pgg45", # play around
+"lweight, lcp, lbph",
+"lweight, lcp, lbph,age",
+"lcavol, lcp",
+"lcavol, lcp, lbph",
+"lcavol, lcp, lbph, age",
+"lcavol, lweight, lcp, age",
+"lweight",
+"lcp, lbph",
+"lcp, lbph, age",
+"lcp",
+"lbph, age",
+"lcavol, lweight,age"),
+                     rbind(lda.1,lda.2,lda.3,lda.4,lda.5, lda.6, lda.7, lda.8, lda.9, lda.10, lda.11, lda.12, lda.13, lda.14, lda.15, lda.16,lda.17, lda.18))
+
+
+
+#lda.df <-  data.frame(Predictors=c("lcavol,lweight,lcp,lbph", "lcavol,lweight,lcp", "lcavol,lweight", "lcavol", "lweight"),rbind(lda.1,lda.2,lda.3,lda.4,lda.5))
+
+metric_lda <- c("accuracy", "sensitivity", "specificity", "f1", "precision", "auc")
+
+gt_lda <- gt(lda.df)
+
+# Loop over columns
+for (col in metric_lda) {
+  min_row <- which.max(lda.df[[col]])  # row index of minimum
+  gt_lda <- gt_lda %>%
+    tab_style(
+      style = list(
+        cell_fill(color = "yellow"),
+        cell_text(weight = "bold")
+        #cell_borders(color = "#000000", weight = px(2))
+      ),
+      locations = cells_body(
+        columns = all_of(col),  # the column to highlight
+        rows = min_row          # the row to highlight
+      )
+    )
+}
+
+gt_lda
+```
+
+```{r}
+
+#Checking of assumptions
+
+# indiv normality
+#H0:Data are normally distributed
+#Ha:Data are not normally distributed
+
+shapiro.test(prostate_LDA$lcavol)
+shapiro.test(prostate_LDA$lweight)
+shapiro.test(prostate_LDA$lcp)
+
+
+# indiv homogeneity of var
+#p-value > 0.05 → variances are equal (assumption satisfied)
+#p-value < 0.05 → variances differ (assumption violated)
+bartlett.test(lcavol~psa_binary, data=prostate_LDA)
+bartlett.test(lweight~psa_binary, data=prostate_LDA)
+bartlett.test(lcp~psa_binary, data=prostate_LDA)
+bartlett.test(lbph~psa_binary, data=prostate_LDA)
+
+# multi homogeneity of covar
+#H0:Covariance matrices are equal across groups (homogeneity of covariance)
+#𝐻a:Covariance matrices are not equal (heterogeneity)
+
+library(biotools)
+boxM(prostate_LDA[,c("lcavol","lweight", "lcp", "lbph")],prostate_LDA$psa_binary)
+boxM(prostate_LDA[,c("lcavol","lweight")],prostate_LDA$psa_binary)
+
+library(MVN)
+see <- mvn(
+  prostate_LDA[, c("lcavol","lweight")],
+  descriptives = TRUE,
+  univariate_test = "SW",        # Shapiro-Wilk
+  mvn_test = "hz" 
+)
+see$descriptives
+see$univariate_normality
+see$multivariate_normality
+
+###########################
+see2 <- mvn(
+  prostate_LDA[, c("lcavol","lweight", "lcp", "lbph")],
+  descriptives = TRUE,
+  univariate_test = "SW",        # Shapiro-Wilk
+  mvn_test = "hz" 
+)
+see2$descriptives
+see2$univariate_normality
+see2$multivariate_normality
+```
+
+```{r}
+
+
+LDA_model <- lda(psa_binary ~ lcavol + lweight, data=prostate_LDA)
+LDA_model$counts
+LDA_model$prior
+LDA_model$means
+LDA_model$scaling #coefficients of normalized predictor variables used to form the LDA decision rule.
+
+plot(LDA_model)
+
+LDA_modelpred <- predict(LDA_model, prostate_binary)
+table(prostate_binary$psa_binary,LDA_modelpred$class)
+mean(prostate_binary$psa_binary==LDA_modelpred$class)
+
+head(LDA_modelpred$posterior)
+head(LDA_modelpred$class)
+head(LDA_modelpred$x)
+
+
+mydata2 <- cbind(prostate_LDA, LDA_modelpred$x, Pred=LDA_modelpred$class)
+
+cor(LDA_modelpred$x,prostate_LDA$lcavol)
+cor(LDA_modelpred$x,prostate_LDA$lweight)
+
+str(mydata2)
+p1 <- ggplot(mydata2, aes(lcavol, lweight)) +
+  geom_point(aes(color = psa_binary)) +
+  ggtitle("Actual")
+
+p2 <- ggplot(mydata2, aes(lcavol, lweight)) +
+  geom_point(aes(color = Pred)) +
+  ggtitle("Predicted")
+
+p3 <- ggplot(mydata2, aes(LD1, lcavol)) +
+  geom_point(aes(color = Pred)) +
+  ggtitle("LD1 vs lcavol")
+
+p4 <- ggplot(mydata2, aes(LD1, lweight)) +
+  geom_point(aes(color = Pred)) +
+  ggtitle("LD1 vs lweight")
+
+(p1 | p2) / (p3 | p4)
+
+p5 <- ggplot(mydata2, aes(psa_binary, LD1)) +  geom_boxplot()
+p6 <- ggplot(mydata2, aes(Pred, LD1)) +  geom_boxplot()
+
+p5|p6
+
+```
+
+#Select the best model (LR vs NB vs LDA)
+
+#Train-Test split
+
+```{r}
+set.seed(123)
+train_binary <- sample(seq_len(nrow(prostate_binary.master)),0.7*nrow(prostate_binary.master))
+
+
+#table(prostate_binary.master$psa_binary)/97
+#table(prostate_binary.master[train_binary,]$psa_binary)/97
+#table(prostate_binary.master[-train_binary,]$psa_binary)/97
+
+str(prostate_binary.master[train_binary,])
+```
+
+#Retrain
+
+```{r}
+LR <- glm(psa_binary ~lcavol + lweight + lcp, data = prostate_binary.master[train_binary, ], family = binomial(link="logit"))
+
+NB <- naiveBayes(psa_binary~ lcavol + lweight + lcp +age, data=prostate_binary.master[train_binary, ])
+  
+LDA <- lda(psa_binary ~ lcavol + lweight, data=prostate_binary.master[train_binary, ])
+
+
+
+```
+
+#Measures (70-30)
+```{r}
+#measures::listAllMeasures()
+
+train_data <- prostate_binary.master[train_binary, ]
+test_data <- prostate_binary.master[-train_binary, ]
+
+response <- 'psa_binary'
+
+test_data[[response]]
+
+binary_eval <- function(LR,NB,LDA, test_data, response, negative='Low PSA (0)', positive='High PSA (1)'){
+
+  LR.probs <- predict(LR, newdata=test_data, type="response")
+
+LR.pred <- factor(ifelse(LR.probs > 0.5, positive, negative), levels = c(negative,positive))
+
+NB.probs <- predict(NB, newdata=test_data, type="raw")
+
+NB.pred <- predict(NB, newdata=test_data)
+
+LDA.probs <- predict(LDA, newdata=test_data)
+
+#TPR (Sensitivity)
+TPR <- numeric(3)
+TPR[1] <- measures::TPR(test_data[[response]],LR.pred,positive)
+TPR[2] <- measures::TPR(test_data[[response]],NB.pred,positive)
+TPR[3] <- measures::TPR(test_data[[response]],LDA.probs$class,positive)
+
+#TNR (Specificity)
+TNR <- numeric(3)
+TNR[1] <- measures::TPR(test_data[[response]],LR.pred,negative)
+TNR[2] <- measures::TPR(test_data[[response]],NB.pred,negative)
+TNR[3] <- measures::TPR(test_data[[response]],LDA.probs$class,negative)
+
+#FPR (Fallout)
+FPR <- numeric(3)
+FPR[1] <- measures::FPR(test_data[[response]],LR.pred,negative,positive)
+FPR[2] <- measures::FPR(test_data[[response]],NB.pred,negative,positive)
+FPR[3] <- measures::FPR(test_data[[response]],LDA.probs$class,negative,positive)
+
+#FNR
+FNR <- numeric(3)
+FNR[1] <- measures::FNR(test_data[[response]],LR.pred,negative,positive)
+FNR[2] <-measures::FNR(test_data[[response]],NB.pred,negative,positive)
+FNR[3] <-measures::FNR(test_data[[response]],LDA.probs$class,negative,positive)
+
+#PPV
+PPV <- numeric(3)
+PPV[1] <- measures::PPV(test_data[[response]],LR.pred,positive,LR.probs)
+PPV[2] <- measures::PPV(test_data[[response]],NB.pred,positive,NB.probs[, positive])
+PPV[3] <- measures::PPV(test_data[[response]],LDA.probs$class,positive,LDA.probs$posterior[,positive])
+
+#NPV
+NPV <- numeric(3)
+NPV[1] <- measures::NPV(test_data[[response]],LDA.probs$class,negative)
+NPV[2] <- measures::NPV(test_data[[response]],NB.pred,negative)
+NPV[3] <- measures::NPV(test_data[[response]],LDA.probs$class,negative)
+
+#FDR
+FDR <- numeric(3)
+FDR[1] <- measures::FDR(test_data[[response]],LR.pred,positive)
+FDR[2] <- measures::FDR(test_data[[response]],NB.pred,positive)
+FDR[3] <- measures::FDR(test_data[[response]],LDA.probs$class,positive)
+
+
+#Youden's J (J=TPR + TNR -1)
+Youden <- numeric(3)
+Youden <- TPR + TNR -1
+
+#Dominance [+1: perfect accuracy on positive class; 0: desirable]
+Dominance <- numeric(3)
+Dominance <- TPR - TNR
+
+#AUC
+auc <- numeric(3)
+auc[1] <- measures::AUC(LR.probs,test_data[[response]],negative,positive)
+auc[2] <- measures::AUC(NB.probs[, positive],test_data[[response]],negative,positive)
+auc[3] <- measures::AUC(LDA.probs$posterior[,positive],test_data[[response]],negative,positive)
+
+#Accuracy (desirable: max)
+acc <- numeric(3)
+acc[1] <- measures::ACC(test_data[[response]],LR.pred)
+acc[2] <-measures::ACC(test_data[[response]],NB.pred)
+acc[3] <-measures::ACC(test_data[[response]],LDA.probs$class)
+
+
+#BAC (desirable: max)
+bac <- numeric(3)
+bac[1] <- measures::BAC(test_data[[response]],LR.pred,negative, positive)
+bac[2] <- measures::BAC(test_data[[response]],NB.pred,negative, positive)
+bac[3] <- measures::BAC(test_data[[response]],LDA.probs$class,negative, positive)
+
+#MCC
+mcc <- numeric(3)
+mcc[1] <- measures::MCC(test_data[[response]],LR.pred,negative, positive)
+mcc[2] <- measures::MCC(test_data[[response]],NB.pred,negative, positive)
+mcc[3] <- measures::MCC(test_data[[response]],LDA.probs$class,negative, positive)
+
+#F1
+f1 <- numeric(3)
+f1[1] <- measures::F1(test_data[[response]],LR.pred,positive) 
+f1[2] <- measures::F1(test_data[[response]],NB.pred,positive)
+f1[3] <- measures::F1(test_data[[response]],LDA.probs$class,positive)
+
+#KAPPA
+kappa <- numeric(3)
+kappa[1] <- measures::KAPPA(test_data[[response]],LR.pred)
+kappa[2] <- measures::KAPPA(test_data[[response]],NB.pred)
+kappa[3] <- measures::KAPPA(test_data[[response]],LDA.probs$class)
+
+#GMEAN
+gmean <- numeric(3)
+gmean[1] <- measures::GMEAN(test_data[[response]],LR.pred,negative,positive)
+gmean[2] <- measures::GMEAN(test_data[[response]],NB.pred,negative,positive)
+gmean[3] <- measures::GMEAN(test_data[[response]],LDA.probs$class,negative,positive)
+
+
+df <- as.data.frame(round(rbind(TPR, TNR, FPR, FNR, PPV, NPV, FDR, Youden, Dominance, auc, acc, bac, mcc, f1, kappa, gmean),2))
+
+Desirable_range <- c('0–1, closer to 1', 
+                       '0–1, closer to 1', 
+                       '0–1, closer to 0', 
+                       '0–1, closer to 0',
+                       '0–1, closer to 1',
+                       '0–1, closer to 1',
+                       '0–1, closer to 0',
+                       '0–1, closer to 1',
+                       '-1–1, closer to 0',
+                       '0.5–1, closer to 1',
+                       '0–1, closer to 1',
+                       '0–1, closer to 1',
+                       '-1 to 1, closer to 1',
+                       '0–1, closer to 1',
+                       '-1 to 1, closer to 1',
+                       '0–1, closer to 1')
+
+rownames(df) <- c("TPR (Sensitivity)", "TNR (Specificity)", "FPR (Fallout)", "FNR (Miss rate)", "PPV (Precision)", "NPV", "FDR", "Youden's index", "Dominance", "AUC", "Accuracy", "Balanced Accuracy", "MCC", "F1 score", "Cohen's Kappa", "Gmean")
+
+colnames(df) <- c("LR", "NB", "LDA")
+
+df <- cbind(df,'Desirable range'=Desirable_range)
+
+get_best_model <- function(row_values, desirable) {
+  models <- names(row_values)
+  values <- as.numeric(row_values)
+  
+  if (grepl("closer to 1", desirable)) {
+    best_val <- max(values)
+    idx <- which(values == best_val)
+    
+  } else if (grepl("closer to 0", desirable) & grepl("-1", desirable)) {
+    best_val <- min(abs(values))
+    idx <- which(abs(values) == best_val)
+    
+  } else if (grepl("closer to 0", desirable)) {
+    best_val <- min(values)
+    idx <- which(values == best_val)
+    
+  } else {
+    stop("Unknown desirable range")
+  }
+  
+  paste(models[idx], collapse = " / ")
+}
+
+df$Best_model <- mapply(
+  FUN = get_best_model,
+  split(df[, c("LR", "NB", "LDA")], seq(nrow(df))),  # each row as list
+  df$`Desirable range`                             # corresponding desirable range
+)
+  
+return(df)
+}
+
+#test metrics
+pred_measures <- binary_eval(LR,NB,LDA, test_data, response, negative='Low PSA (0)', positive='High PSA (1)')
+
+pred_measures_table <- pred_measures |> 
+  rownames_to_column(var = "Metric")  # Convert row names to a column
+
+gt(pred_measures_table)
+
+#train metrics
+pred_measures_train <- binary_eval(LR,NB,LDA, train_data, response, negative='Low PSA (0)', positive='High PSA (1)')
+
+pred_measures_table_train <- pred_measures_train |> 
+  rownames_to_column(var = "Metric")  # Convert row names to a column
+
+gt(pred_measures_table_train)
+
+```
+
+
+
+
+#Cross-validated measures
+```{r}
+cv_metrics <- function(data, response, predictors.lr, predictors.nb, predictors.lda, k = 5, positive = "High PSA (1)", negative="Low PSA (0)") {
+  
+  set.seed(123)
+  #folds <- sample(rep(1:k, length.out = nrow(data)))
+  folds <- createFolds(data[[response]], k = k, list = TRUE)
+  
+  metrics <- data.frame(
+    TPR.LR = numeric(k), TPR.NB = numeric(k), TPR.LDA = numeric(k),
+    TNR.LR = numeric(k), TNR.NB = numeric(k), TNR.LDA = numeric(k),
+    FPR.LR = numeric(k), FPR.NB = numeric(k), FPR.LDA = numeric(k),
+    FNR.LR = numeric(k), FNR.NB = numeric(k), FNR.LDA = numeric(k),
+    PPV.LR = numeric(k), PPV.NB = numeric(k), PPV.LDA = numeric(k),
+    NPV.LR = numeric(k), NPV.NB = numeric(k), NPV.LDA = numeric(k),
+    FDR.LR = numeric(k), FDR.NB = numeric(k), FDR.LDA = numeric(k),
+    Youden.LR = numeric(k), Youden.NB = numeric(k), Youden.LDA = numeric(k),
+    Dominance.LR = numeric(k), Dominance.NB = numeric(k), Dominance.LDA = numeric(k),
+    auc.LR = numeric(k), auc.NB = numeric(k), auc.LDA = numeric(k),
+    acc.LR = numeric(k), acc.NB = numeric(k), acc.LDA = numeric(k),
+    bac.LR = numeric(k), bac.NB = numeric(k), bac.LDA = numeric(k),
+    mcc.LR = numeric(k), mcc.NB = numeric(k), mcc.LDA = numeric(k),
+    f1.LR = numeric(k), f1.NB = numeric(k), f1.LDA = numeric(k),
+    kappa.LR = numeric(k), kappa.NB = numeric(k), kappa.LDA = numeric(k),
+    gmean.LR = numeric(k), gmean.NB = numeric(k), gmean.LDA = numeric(k)
+  )
+  
+  for (i in 1:k) {
+    #train <- data[folds != i, ]
+    #test  <- data[folds == i, ]
+    
+    test_idx <- folds[[i]]
+  train <- data[-test_idx, ]
+  test  <- data[test_idx, ]
+    
+    formula.lr <- as.formula(
+      paste(response, "~", paste(predictors.lr, collapse = "+"))
+    )
+    
+    formula.nb <- as.formula(
+      paste(response, "~", paste(predictors.nb, collapse = "+"))
+    )
+    
+    formula.lda <- as.formula(
+      paste(response, "~", paste(predictors.lda, collapse = "+"))
+    )
+    
+    model.lr <- glm(formula.lr, data = train, family = binomial(link="logit"))
+    model.nb <- naiveBayes(formula.nb, data = train)
+    model.lda <- lda(formula.lda, data = train)
+    
+    #LR
+    probs.lr <- predict(model.lr, newdata=test, type="response")
+    preds.lr <- factor(ifelse(probs.lr > 0.5, positive, negative), levels = c(negative,positive))
+    
+    #NB
+    probs.nb <- predict(model.nb, test, type = "raw")[, positive]
+    preds.nb <- predict(model.nb, test)
+    
+    #LDA
+    probs.lda0 <- predict(model.lda, newdata=test)
+    probs.lda <- probs.lda0$posterior[, positive]
+    preds.lda <- probs.lda0$class
+    
+    
+    actual <- test[[response]]
+    
+#TPR (Sensitivity)
+
+metrics$TPR.LR[i] <- measures::TPR(actual,preds.lr,positive)
+metrics$TPR.NB[i] <- measures::TPR(actual,preds.nb,positive)
+metrics$TPR.LDA[i] <- measures::TPR(actual,preds.lda,positive)
+
+
+#TNR (Specificity)
+
+metrics$TNR.LR[i] <- measures::TNR(actual,preds.lr,negative)
+metrics$TNR.NB[i] <- measures::TNR(actual,preds.nb,negative)
+metrics$TNR.LDA[i] <- measures::TNR(actual,preds.lda,negative)
+
+
+#FPR (Fallout)
+
+metrics$FPR.LR[i] <- measures::FPR(actual,preds.lr,negative,positive)
+metrics$FPR.NB[i] <- measures::FPR(actual,preds.nb,negative,positive)
+metrics$FPR.LDA[i] <- measures::FPR(actual,preds.lda,negative,positive)
+
+
+#FNR
+
+metrics$FNR.LR[i] <- measures::FNR(actual,preds.lr,negative,positive)
+metrics$FNR.NB[i] <- measures::FNR(actual,preds.nb,negative,positive)
+metrics$FNR.LDA[i] <- measures::FNR(actual,preds.lda,negative,positive)
+
+
+#PPV
+
+metrics$PPV.LR[i] <- measures::PPV(actual,preds.lr,positive,probs.lr)
+metrics$PPV.NB[i] <- measures::PPV(actual,preds.nb,positive,probs.nba)
+metrics$PPV.LDA[i] <- measures::PPV(actual,preds.lda,positive,probs.lda)
+
+
+#NPV
+
+metrics$NPV.LR[i] <- measures::NPV(actual,preds.lr,negative)
+metrics$NPV.NB[i] <- measures::NPV(actual,preds.nb,negative)
+metrics$NPV.LDA[i] <- measures::NPV(actual,preds.lda,negative)
+
+#FDR
+
+metrics$FDR.LR[i] <- measures::FDR(actual,preds.lr,positive)
+metrics$FDR.NB[i] <- measures::FDR(actual,preds.nb,positive)
+metrics$FDR.LDA[i] <- measures::FDR(actual,preds.lda,positive)
+
+#Youden's J (J=TPR + TNR -1)
+
+metrics$Youden.LR[i] <- metrics$TPR.LR[i] + metrics$TNR.LR[i] - 1
+metrics$Youden.NB[i] <- metrics$TPR.NB[i] + metrics$TNR.NB[i] - 1
+metrics$Youden.LDA[i] <- metrics$TPR.LDA[i] + metrics$TNR.LDA[i] - 1
+
+#Dominance [+1: perfect accuracy on positive class; 0: desirable]
+
+metrics$Dominance.LR[i] <- metrics$TPR.LR[i] - metrics$TNR.LR[i]
+metrics$Dominance.NB[i] <- metrics$TPR.NB[i] - metrics$TNR.NB[i]
+metrics$Dominance.LDA[i] <- metrics$TPR.LDA[i] +- metrics$TNR.LDA[i]
+
+#AUC
+
+metrics$auc.LR[i] <- measures::AUC(probs.lr,actual,negative,positive)
+metrics$auc.NB[i] <- measures::AUC(probs.nb,actual,negative,positive)
+metrics$auc.LDA[i] <- measures::AUC(probs.lda,actual,negative,positive)
+
+
+#Accuracy (desirable: max)
+
+metrics$acc.LR[i] <- measures::ACC(actual,preds.lr)
+metrics$acc.NB[i] <- measures::ACC(actual,preds.nb)
+metrics$acc.LDA[i] <- measures::ACC(actual,preds.lda)
+
+#BAC (desirable: max)
+
+metrics$bac.LR[i] <- measures::BAC(actual,preds.lr,negative, positive)
+metrics$bac.NB[i] <- measures::BAC(actual,preds.nb,negative, positive)
+metrics$bac.LDA[i] <- measures::BAC(actual,preds.lda,negative, positive)
+
+#MCC
+
+metrics$mcc.LR[i] <- measures::MCC(actual,preds.lr,negative, positive)
+metrics$mcc.NB[i] <- measures::MCC(actual,preds.nb,negative, positive)
+metrics$mcc.LDA[i] <- measures::MCC(actual,preds.lda,negative, positive)
+
+#F1
+
+metrics$f1.LR[i] <- measures::F1(actual,preds.lr,positive) 
+metrics$f1.NB[i] <- measures::F1(actual,preds.nb,positive)
+metrics$f1.LDA[i] <- measures::F1(actual,preds.lda,positive)
+
+#KAPPA
+
+metrics$kappa.LR[i] <- measures::KAPPA(actual,preds.lr)
+metrics$kappa.NB[i] <- measures::KAPPA(actual,preds.nb)
+metrics$kappa.LDA[i] <- measures::KAPPA(actual,preds.lda)
+
+#GMEAN
+
+metrics$gmean.LR[i] <- measures::GMEAN(actual,preds.lr,negative,positive)
+metrics$gmean.NB[i] <- measures::GMEAN(actual,preds.nb,negative,positive)
+metrics$gmean.LDA[i] <- measures::GMEAN(actual,preds.lda,negative,positive)
+  }
+  
+  round(colMeans(metrics, na.rm = TRUE), 2)
+}
+
+data <- prostate_binary.master
+
+predictors.lr <- c("lcavol", "lweight", "lcp")
+predictors.nb <- c("lcavol", "lweight", "lcp", "age")
+predictors.lda <- c("lcavol", "lweight")
+
+response <- 'psa_binary'
+z <- cv_metrics(data, response, predictors.lr, predictors.nb, predictors.lda, k = 10, positive = "High PSA (1)", negative="Low PSA (0)")
+
+```
+
+#Format in table
+
+```{r}
+df <- data.frame(
+  LR = c(z["TPR.LR"], z["TNR.LR"], z["FPR.LR"], z["FNR.LR"], z["PPV.LR"],
+         z["NPV.LR"], z["FDR.LR"], z["Youden.LR"], z["Dominance.LR"],
+         z["auc.LR"], z["acc.LR"], z["bac.LR"], z["mcc.LR"], z["f1.LR"],
+         z["kappa.LR"], z["gmean.LR"]),
+  
+  NB = c(z["TPR.NB"], z["TNR.NB"], z["FPR.NB"], z["FNR.NB"], z["PPV.NB"],
+         z["NPV.NB"], z["FDR.NB"], z["Youden.NB"], z["Dominance.NB"],
+         z["auc.NB"], z["acc.NB"], z["bac.NB"], z["mcc.NB"], z["f1.NB"],
+         z["kappa.NB"], z["gmean.NB"]),
+  
+  LDA = c(z["TPR.LDA"], z["TNR.LDA"], z["FPR.LDA"], z["FNR.LDA"], z["PPV.LDA"],
+          z["NPV.LDA"], z["FDR.LDA"], z["Youden.LDA"], z["Dominance.LDA"],
+          z["auc.LDA"], z["acc.LDA"], z["bac.LDA"], z["mcc.LDA"], z["f1.LDA"],
+          z["kappa.LDA"], z["gmean.LDA"])
+)
+  
+  rownames(df) <- c(
+  "TPR (Sensitivity)", "TNR (Specificity)", "FPR (Fallout)", "FNR (Miss rate)",
+  "PPV (Precision)", "NPV", "FDR", "Youden's index", "Dominance", "AUC",
+  "Accuracy", "Balanced Accuracy", "MCC", "F1 score", "Cohen's Kappa", "Gmean"
+)
+
+############################
+Desirable_range <- c(
+  '0–1, closer to 1', '0–1, closer to 1', '0–1, closer to 0', '0–1, closer to 0',
+  '0–1, closer to 1', '0–1, closer to 1', '0–1, closer to 0', '0–1, closer to 1',
+  '-1–1, closer to 0', '0.5–1, closer to 1', '0–1, closer to 1', '0–1, closer to 1',
+  '-1 to 1, closer to 1', '0–1, closer to 1', '-1 to 1, closer to 1', '0–1, closer to 1'
+)
+
+df$`Desirable range` <- Desirable_range
+
+########################
+get_best_model <- function(row_values, desirable) {
+  models <- names(row_values)
+  values <- as.numeric(row_values)
+  
+  if (grepl("closer to 1", desirable)) {
+    best_val <- max(values)
+    idx <- which(values == best_val)
+    
+  } else if (grepl("closer to 0", desirable) & grepl("-1", desirable)) {
+    best_val <- min(abs(values))
+    idx <- which(abs(values) == best_val)
+    
+  } else if (grepl("closer to 0", desirable)) {
+    best_val <- min(values)
+    idx <- which(values == best_val)
+    
+  } else {
+    stop("Unknown desirable range")
+  }
+  
+  paste(models[idx], collapse = " / ")
+}
+
+#####################
+df$Best_model <- mapply(
+  FUN = get_best_model,
+  split(df[, c("LR", "NB", "LDA")], seq(nrow(df))),
+  df$`Desirable range`
+)
+
+cv.table <- df |> 
+  rownames_to_column(var = "Metric")  # Convert row names to a column
+
+gt(cv.table)
+```
+
+
+
+#Confusion Matrix (LR)
+
+```{r}
+pscl::pR2(LR)
+
+LR.probs <- predict(LR, newdata=test_data, type="response")
+
+LR.pred <- factor(ifelse(LR.probs > 0.5, "High PSA (1)", "Low PSA (0)"), levels = c("Low PSA (0)", "High PSA (1)"))
+
+#LR.pred <- predict(LR, newdata = prostate_binary.master[-train_binary, ])
+#LR.pred <- ifelse(LR.pred>0.5,1, 0)
+#LR.pred <- factor(LR.pred,
+#                  levels = c(0,1),
+#                  labels=c("Low PSA (0)", "High PSA (1)"))
+#LR.pred.train <- predict(LR, newdata = train_data)
+
+table(prostate_binary.master[-train_binary, ]$psa_binary,LR.pred)
+
+#measures::PPV(test_data[[response]],NB.pred,positive)
+
+confusionMatrix(
+  data = LR.pred,                  # predicted classes
+  reference = prostate_binary.master[-train_binary, ]$psa_binary, # actual classes
+positive = "High PSA (1)")
+
+#ROC
+y_true.lr <- test_data$psa_binary
+levels(y_true.lr)
+
+roc_obj <- roc(response = y_true.lr,
+               predictor = LR.probs,
+               levels = c("Low PSA (0)", "High PSA (1)"),
+               direction = "<")
+
+plot(roc_obj, col = "blue", lwd = 2, legacy.axes = TRUE)
+
+```
+
+#Categorical
+
+```{r}
+prostate_categorical <- prostate |> 
+  mutate(psa=exp(lpsa)) |> 
+  mutate(psa_category=ifelse(psa<=4,"low risk",ifelse(psa>4&psa<=10,"at risk","high risk"))) |> 
+  dplyr::select(-lpsa,-psa)
+
+prostate_categorical$psa_category <- factor(prostate_categorical$psa_category, levels = c("low risk", "at risk", "high risk"))
+
+prostate_categorical$svi <- factor(prostate_categorical$svi)
+prostate_categorical$gleason <- factor(prostate_categorical$gleason)
+
+levels(prostate_categorical$psa_category)
+str(prostate_categorical)
+table(prostate_categorical$psa_category)
+table(prostate_categorical$psa_category)/nrow(prostate_categorical)
+#View(prostate_categorical)
+```
+
+#Train-test split (categorical)
+
+```{r}
+set.seed(123)
+train_categorical <- sample(seq_len(nrow(prostate_categorical)), 0.7*nrow(prostate_categorical))
+
+train_data.cat <- prostate_categorical[train_categorical,]
+test_data.cat <- prostate_categorical[-train_categorical,]
+```
+
+
+#rpart
+
+```{r}
+set.seed(123)
+rpart_model <- rpart(psa_category ~., data=prostate_categorical, method = "class")
+
+print(rpart_model)
+
+rpart.plot(rpart_model)
+
+plot(as.party(rpart_model))
+```
+
+```{r}
+rpart_model.train <- rpart(psa_category ~., data=train_data.cat, method = "class")
+
+#train
+tree.pred.train <- predict(rpart_model.train, train_data.cat, type="class") 
+
+tree.pred.train <- factor(
+  tree.pred.train,
+  levels = levels(train_data.cat$psa_category),
+  ordered = TRUE
+)
+
+#test
+tree.pred <- predict(rpart_model.train, test_data.cat, type="class") 
+
+tree.pred <- factor(
+  tree.pred,
+  levels = levels(test_data.cat$psa_category),
+  ordered = TRUE
+)
+
+
+#train accuracy
+#table(train_data.cat$psa_category, tree.pred.train)
+confusionMatrix(data=tree.pred.train, reference=train_data.cat$psa_category)
+paste('Train Accuracy =',round(mean(train_data.cat$psa_category==tree.pred.train),3))# accuracy
+
+#test accuracy
+#table(test_data.cat$psa_category, tree.pred)
+confusionMatrix(data=tree.pred, reference=test_data.cat$psa_category)
+paste('Test Accuracy =',round(mean(test_data.cat$psa_category==tree.pred),3))# accuracy
+```
+
+```{r}
+# Pruning tree  ----
+printcp(rpart_model)
+rpart_model$cptable
+plotcp(rpart_model)
+
+cp.min <- rpart_model$cptable[which.min(rpart_model$cptable[,"xerror"]),"CP"]
+mytree.prune <- prune(rpart_model,cp.min)
+print(mytree.prune)
+#rpart.plot(mytree.prune, box.palette = "Greens")
+rpart.plot(mytree.prune)
+
+tree.pred <- predict(mytree.prune, prostate_categorical, type="class") 
+
+tree.pred <- factor(
+  tree.pred,
+  levels = levels(prostate_categorical$psa_category),
+  ordered = TRUE
+)
+
+table(prostate_categorical$psa_category, tree.pred)
+mean(prostate_categorical$psa_category==tree.pred)# accuracy
+```
+
+#Adaboost
+
+```{r}
+
+
+set.seed(100)
+
+ctrl <- trainControl(
+  method = "repeatedcv",
+  number = 5
+)
+
+grid <- expand.grid(
+  mfinal = c(seq(from=20,to=45, by=1)),
+  maxdepth = c(1, 2, 3, 4, 5),
+  coeflearn = c("Breiman", "Freund")
+)
+
+set.seed(100)
+model <- train(
+  psa_category ~ .,
+  data = prostate_categorical[train_categorical,],
+  method = "AdaBoost.M1",
+  trControl = ctrl,
+  tuneGrid = grid
+)
+
+model$bestTune
+View(model$results)
+```
+
+#Final boosting
+
+```{r}
+#final_bst <- boosting(
+#  psa_category ~ .,
+#  data = prostate_categorical[train_categorical,],
+#  boos = TRUE,
+#  mfinal = 30,
+#  coeflearn = "Freund",
+#  control = rpart.control(maxdepth = 3)
+#)
+
+#CV accuracy 0.7043956
+max(model$results[,'Accuracy'])
+
+#train error 0.761194
+#pred.train <- predict(model, prostate_categorical[train_categorical,])
+
+#y_pred.train <- pred.train
+#y_true.train <- prostate_categorical$psa_category[train_categorical]
+
+#mean(y_pred.train == y_true.train)
+
+#test error 0.7
+pred <- predict(model, prostate_categorical[-train_categorical,])
+
+# Class predictions
+y_pred <- pred
+y_true <- prostate_categorical$psa_category[-train_categorical]
+
+# Accuracy
+mean(y_pred == y_true)
+
+attributes(model)
+
+bst.imp <- varImp(model)$importance %>%
+  round(3) %>%
+  as.data.frame() %>%
+  rownames_to_column("Variable") %>%
+  arrange(desc(Overall))
+
+gt(bst.imp)
+
+confusionMatrix(data=y_pred, reference=test_data.cat$psa_category)
+```
+
+#XGBoost
+```{r}
+ctrl.xg <- trainControl(
+  method = "repeatedcv",
+  number = 5,
+  repeats = 5
+)
+
+
+grid.xg <- expand.grid(
+  nrounds = c(100, 200),
+  max_depth = c(2, 3, 4),
+  eta = c(0.05, 0.1, 0.3),
+  gamma = c(0, 1),
+  colsample_bytree = c(0.6, 0.8),
+  min_child_weight = c(1, 5),
+  subsample = c(0.7, 1)
+)
+
+set.seed(100)
+
+#xgb_model <- train(
+  psa_category ~ .,
+  data = prostate_categorical[train_categorical,],
+  method = "xgbTree",
+  trControl = ctrl.xg,
+  tuneGrid = grid.xg
+)
+
+xgb_model$bestTune
+
+test_data <- prostate_categorical[-train_categorical,]
+pred_test <- predict(xgb_model, test_data)
+
+mean(pred_test == test_data$psa_category)
+```
+
+
+#Random Forest
+
+```{r}
+ctrl.rf <- trainControl(
+  method = "repeatedcv",
+  number = 5
+)
+
+grid_rf <- expand.grid(
+  mtry = c(2, 3, 4, 5, 6, 7)
+)
+
+set.seed(123)
+rf_model <- train(
+  psa_category ~ .,
+  data = prostate_categorical[train_categorical,],
+  method = "rf",
+  trControl = ctrl.rf,
+  tuneGrid = grid_rf,
+  ntree = 1000
+)
+
+rf_model$bestTune #mtry=3
+attributes(rf_model)
+
+#CV accuracy (0.6509158) 
+
+max(rf_model$results['Accuracy'])
+
+#train accuracy (100%)
+#pred_rf.train <- predict(rf_model, prostate_categorical[train_categorical,])
+
+#mean(pred_rf.train == prostate_categorical$psa_category[train_categorical])
+
+#test accuracy (0.7666667) OVERFITTING
+pred_rf <- predict(rf_model, prostate_categorical[-train_categorical,])
+
+mean(pred_rf == prostate_categorical$psa_category[-train_categorical])
+
+varImpPlot(rf_model$finalModel)
+
+imp_df_sorted <- as.data.frame(round(importance(rf_model$finalModel),3)) %>%
+  rownames_to_column("Variable") %>%
+  arrange(desc(MeanDecreaseGini))
+
+gt(imp_df_sorted)
+
+confusionMatrix(data=pred_rf, reference=test_data.cat$psa_category)
+
+```
+
+#bagging
+
+```{r}
+
+
+ctrl.bag <- trainControl(
+  method = "repeatedcv",
+  number = 5,
+  repeats = 5
+)
+
+set.seed(123)
+bag_model <- train(
+  psa_category ~ .,
+  data = prostate_categorical[train_categorical,],
+  method = "treebag",
+  trControl = ctrl.bag,
+  nbagg = 200#,
+  #control = rpart.control(
+  #  maxdepth = 3,      # limit depth
+  #  cp = 0.01,         # pruning
+  #  minsplit = 10
+  #)
+)
+
+bag_model$results
+
+#CV Accuracy 0.638293
+max(bag_model$results['Accuracy'])
+
+#test accuracy (0.7333333)
+bagging.pred.test <- predict(bag_model, prostate_categorical[-train_categorical,])
+
+mean(bagging.pred.test == prostate_categorical$psa_category[-train_categorical])
+
+attributes(bag_model)
+
+varImp(bag_model)
+
+imp_df <- varImp(bag_model)$importance %>%
+  as.data.frame() %>%
+  rownames_to_column("Variable") %>%
+  arrange(desc(Overall)) %>%
+  mutate(Overall = round(Overall, 3))
+
+gt(imp_df)
+
+confusionMatrix(data=bagging.pred.test, reference=test_data.cat$psa_category)
+```
